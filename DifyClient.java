@@ -2,13 +2,11 @@ package com.krrr.dify.client;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.DeserializationFeature;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
-import com.google.common.collect.Lists;
+import com.fasterxml.jackson.databind.*;
+import lombok.AllArgsConstructor;
 import lombok.RequiredArgsConstructor;
 import lombok.Setter;
+import lombok.val;
 import org.springframework.boot.web.client.RestTemplateBuilder;
 import org.springframework.core.io.InputStreamResource;
 import org.springframework.http.*;
@@ -29,6 +27,7 @@ import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.stream.Collectors;
 
 /**
  * This class serves as a client for interacting with the Dify API.
@@ -38,16 +37,25 @@ public class DifyClient {
     public static final String OFFICIAL_API_URL = "https://api.dify.ai/v1";
 
     // Constants representing different API routes
-    public static final DifyRoute APPLICATION = new DifyRoute("GET", "/parameters?user=%s");
-    public static final DifyRoute FEEDBACK = new DifyRoute("POST", "/messages/%s/feedbacks");
-    public static final DifyRoute STOP_GENERATION = new DifyRoute("POST", "/chat-messages/%s/stop");
-    public static final DifyRoute CREATE_CHAT_MESSAGE = new DifyRoute("POST", "/chat-messages");
-    public static final DifyRoute GET_CONVERSATION_MESSAGES = new DifyRoute("GET", "/messages?%s");
-    public static final DifyRoute GET_CONVERSATIONS = new DifyRoute("GET", "/conversations?%s");
-    public static final DifyRoute RENAME_CONVERSATION = new DifyRoute("POST", "/conversations/%s/name");
-    public static final DifyRoute DELETE_CONVERSATION = new DifyRoute("DELETE", "/conversations/%s");
+    // chat
+    private static final DifyRoute APP_PARAMETERS = new DifyRoute("GET", "/parameters", DifyRoute.TYPE_CHAT);
+    private static final DifyRoute APP_INFO = new DifyRoute("GET", "/info", DifyRoute.TYPE_CHAT);
+    private static final DifyRoute FEEDBACK = new DifyRoute("POST", "/messages/%s/feedbacks", DifyRoute.TYPE_CHAT);
+    private static final DifyRoute STOP_GENERATION = new DifyRoute("POST", "/chat-messages/%s/stop", DifyRoute.TYPE_CHAT);
+    private static final DifyRoute CREATE_CHAT_MESSAGE = new DifyRoute("POST", "/chat-messages", DifyRoute.TYPE_CHAT);
+    private static final DifyRoute GET_CONVERSATION_MESSAGES = new DifyRoute("GET", "/messages?%s", DifyRoute.TYPE_CHAT);
+    private static final DifyRoute GET_CONVERSATIONS = new DifyRoute("GET", "/conversations?%s", DifyRoute.TYPE_CHAT);
+    private static final DifyRoute RENAME_CONVERSATION = new DifyRoute("POST", "/conversations/%s/name", DifyRoute.TYPE_CHAT);
+    private static final DifyRoute DELETE_CONVERSATION = new DifyRoute("DELETE", "/conversations/%s", DifyRoute.TYPE_CHAT);
+    // knowledge base
+    private static final DifyRoute GET_DATASETS = new DifyRoute("GET", "/datasets", DifyRoute.TYPE_KNOWLEDGE_BASE);
+    private static final DifyRoute CREATE_DOC_TXT = new DifyRoute("POST", "/datasets/%s/document/create-by-text", DifyRoute.TYPE_KNOWLEDGE_BASE);
+    private static final DifyRoute UPDATE_DOC_TXT = new DifyRoute("POST", "/datasets/%s/documents/%s/update-by-text", DifyRoute.TYPE_KNOWLEDGE_BASE);
+    private static final DifyRoute GET_DOCUMENTS = new DifyRoute("POST", "/datasets/%s/retrieve", DifyRoute.TYPE_KNOWLEDGE_BASE);
+    private static final DifyRoute DELETE_DOCUMENT = new DifyRoute("DELETE", "/datasets/%s/documents/%s", DifyRoute.TYPE_KNOWLEDGE_BASE);
 
-    private String apiKey;
+    private String chatApiKey;
+    private String knowledgeBaseApiKey;
     private final String baseUrl;
     private RestTemplate restTemplate;
     private StreamRestTemplate streamRestTemplate;
@@ -61,39 +69,46 @@ public class DifyClient {
     /**
      * Constructs a new DifyClient with the provided API key and default base URL.
      *
-     * @param apiKey The API key to use for authentication.
+     * @param chatApiKey            The API key to use for chat.
+     * @param knowledgeBaseApiKey   The API key to use for knowledge base. Can be null.
      */
-    public DifyClient(String apiKey) {
-        this(apiKey, OFFICIAL_API_URL);
+    public DifyClient(String chatApiKey, String knowledgeBaseApiKey) {
+        this(chatApiKey, knowledgeBaseApiKey, OFFICIAL_API_URL);
     }
 
     /**
      * Constructs a new DifyClient with the provided API key and base URL.
      *
-     * @param apiKey   The API key to use for authentication.
+     * @param chatApiKey   The API key to use for authentication.
+     * @param knowledgeBaseApiKey   The API key to use for knowledge base. Can be null.
      * @param baseUrl  The base URL of the Dify API.
      */
-    public DifyClient(String apiKey, String baseUrl) {
-        if (apiKey == null) {
-            throw new IllegalArgumentException("key is null");
-        }
-        this.apiKey = apiKey;
+    public DifyClient(String chatApiKey, String knowledgeBaseApiKey, String baseUrl) {
+        this.chatApiKey = chatApiKey;
+        this.knowledgeBaseApiKey = knowledgeBaseApiKey;
         this.baseUrl = baseUrl;
         RestTemplateBuilder builder = new RestTemplateBuilder()
                 .setConnectTimeout(Duration.ofSeconds(connectTimeout)).setReadTimeout(Duration.ofSeconds(readTimeout));
         restTemplate = builder.build();
         streamRestTemplate = builder.build(StreamRestTemplate.class);
+        // init json parser
         objectMapper = new ObjectMapper();
         objectMapper.configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
+        objectMapper.setPropertyNamingStrategy(PropertyNamingStrategies.SNAKE_CASE);
     }
 
     /**
-     * Updates the API key used for authentication.
-     *
-     * @param apiKey The new API key.
+     * Updates the API key used for chat.
      */
-    public void updateApiKey(String apiKey) {
-        this.apiKey = apiKey;
+    public void updateChatApiKey(String chatApiKey) {
+        this.chatApiKey = chatApiKey;
+    }
+
+    /**
+     * Updates the API key used for knowledge base.
+     */
+    public void updateKnowledgeBaseApiKey(String knowledgeBaseApiKey) {
+        this.knowledgeBaseApiKey = knowledgeBaseApiKey;
     }
 
     /**
@@ -105,21 +120,21 @@ public class DifyClient {
      * @return The HTTP response containing the result of the API request.
      * @throws DifyClientException If an error occurs while sending the request.
      */
-    public String sendRequest(DifyRoute route, String[] formatArgs, JsonNode body) throws DifyClientException {
+    private String sendRequest(DifyRoute route, String[] formatArgs, JsonNode body) throws DifyClientException {
         try {
             String formattedURL = (formatArgs != null && formatArgs.length > 0)
                     ? String.format(route.url, (Object[]) formatArgs)
                     : route.url;
 
-            HttpHeaders headers = new HttpHeaders();
-            headers.set(HttpHeaders.AUTHORIZATION, "Bearer " + apiKey);
+            val headers = new HttpHeaders();
+            headers.set(HttpHeaders.AUTHORIZATION, "Bearer " + (route.type == DifyRoute.TYPE_CHAT ? chatApiKey : knowledgeBaseApiKey));
             headers.setContentType(MediaType.APPLICATION_JSON);
 
             HttpEntity<String> entity = body != null
                     ? new HttpEntity<>(objectMapper.writeValueAsString(body), headers)
                     : new HttpEntity<>(headers);
 
-            ResponseEntity<String> resp = restTemplate.exchange(baseUrl + formattedURL, HttpMethod.valueOf(route.method), entity, String.class);
+            val resp = restTemplate.exchange(baseUrl + formattedURL, HttpMethod.valueOf(route.method), entity, String.class);
 
             if (resp.getStatusCode() != HttpStatus.OK) {
                 throw new DifyRequestException("Request failed with status: " + resp.getStatusCodeValue());
@@ -136,17 +151,17 @@ public class DifyClient {
      * @param route      The API route to send the request to.
      * @param formatArgs Format arguments for route URL placeholders.
      * @param body       The request body, if applicable.
-     * @return The HTTP response containing the result of the API request.
+     * @return Piped stream
      * @throws DifyClientException If an error occurs while sending the request.
      */
-    public PipedInputStream sendRequestStream(DifyRoute route, String[] formatArgs, JsonNode body) throws DifyClientException {
+     private PipedInputStream sendRequestStream(DifyRoute route, String[] formatArgs, JsonNode body) throws DifyClientException {
         try {
             String formattedURL = (formatArgs != null && formatArgs.length > 0)
                     ? String.format(route.url, (Object[]) formatArgs)
                     : route.url;
 
             HttpHeaders headers = new HttpHeaders();
-            headers.set(HttpHeaders.AUTHORIZATION, "Bearer " + apiKey);
+            headers.set(HttpHeaders.AUTHORIZATION, "Bearer " + (route.type == DifyRoute.TYPE_CHAT ? chatApiKey : knowledgeBaseApiKey));
             headers.setContentType(MediaType.APPLICATION_JSON);
 
             HttpEntity<String> entity = body != null
@@ -164,6 +179,8 @@ public class DifyClient {
         }
     }
 
+    ///////////////// chat api /////////////////
+
     /**
      * Stops the generation of a chat message.
      *
@@ -172,7 +189,7 @@ public class DifyClient {
      * @throws DifyClientException If an error occurs while sending the request.
      */
     public void stopGeneration(String taskId, String user) throws DifyClientException {
-        ObjectNode json = objectMapper.createObjectNode();
+        val json = objectMapper.createObjectNode();
         json.put("user", user);
 
         JsonNode ret;
@@ -185,47 +202,48 @@ public class DifyClient {
     }
 
     /**
-     * Sends a message feedback to the Dify API.
+     * Sends a message feedback.
      *
      * @param messageId The ID of the message to provide feedback for.
      * @param rating    The feedback rating.
      * @param user      The user providing the feedback.
-     * @return The HTTP response containing the result of the API request.
      * @throws DifyClientException If an error occurs while sending the request.
      */
-    public JsonNode messageFeedback(String messageId, String rating, String user) throws DifyClientException {
-        ObjectNode json = objectMapper.createObjectNode();
+    public void messageFeedback(String messageId, String rating, String user, String content) throws DifyClientException {
+        val json = objectMapper.createObjectNode();
         json.put("rating", rating);
         json.put("user", user);
+        json.put("content", content);
 
-//        return sendRequest(FEEDBACK, new String[]{messageId}, json);
-        return null;
+        sendRequest(FEEDBACK, new String[]{messageId}, json);
     }
 
     /**
-     * Retrieves application parameters from the Dify API.
+     * Retrieves application basic info.
      *
-     * @param user The user for whom the application parameters are retrieved.
-     * @return The HTTP response containing the result of the API request.
      * @throws DifyClientException If an error occurs while sending the request.
      */
-    public JsonNode getApplicationParameters(String user) throws DifyClientException {
-        return null;
-//        return sendRequest(APPLICATION, new String[]{user}, null);
+    public Map<String, Object> getApplicationInfo() throws DifyClientException {
+        String ret = sendRequest(APP_INFO, null, null);
+        try {
+            return objectMapper.readValue(ret, new TypeReference<Map<String, Object>>() {});
+        } catch (JsonProcessingException e) {
+            throw new RuntimeException(e.getMessage(), e.getCause());
+        }
     }
 
     /**
-     * Generates query parameters in the form of key-value pairs joined by "&".
+     * Retrieves application parameters.
      *
-     * @param params The map of query parameter key-value pairs.
-     * @return A string representation of the generated query parameters.
+     * @throws DifyClientException If an error occurs while sending the request.
      */
-    private String generateQueryParams(Map<String, String> params) {
-        List<String> keyValuePairs = new ArrayList<>();
-        for (Map.Entry<String, String> entry : params.entrySet()) {
-            keyValuePairs.add(entry.getKey() + "=" + entry.getValue());
+    public Map<String, Object> getApplicationParameters() throws DifyClientException {
+        String ret = sendRequest(APP_PARAMETERS, null, null);
+        try {
+            return objectMapper.readValue(ret, new TypeReference<Map<String, Object>>() {});
+        } catch (JsonProcessingException e) {
+            throw new RuntimeException(e.getMessage(), e.getCause());
         }
-        return String.join("&", keyValuePairs);
     }
 
     /**
@@ -234,38 +252,40 @@ public class DifyClient {
      * @param inputs         The chat message inputs.
      * @param query          The query associated with the chat message.
      * @param user           The user associated with the chat message.
-     * @param conversation_id The ID of the conversation, if applicable.
-     * @return The HTTP response containing the result of the API request.
+     * @param conversationId The ID of the conversation, if applicable.
      * @throws DifyClientException If an error occurs while sending the request.
      */
-    public Message createChatMessage(JsonNode inputs, String query, String user, String conversation_id) throws DifyClientException {
-        ObjectNode json = objectMapper.createObjectNode();
+    public Message createChatMessage(JsonNode inputs, String query, String user, String conversationId) throws DifyClientException {
+        val json = objectMapper.createObjectNode();
         json.put("inputs", inputs);
         json.put("query", query);
         json.put("user", user);
         json.put("response_mode", "blocking");
         json.put("auto_generate_name", autoGenerateName);
-        if (conversation_id != null && !conversation_id.isEmpty()) {
-            json.put("conversation_id", conversation_id);
+        if (conversationId != null && !conversationId.isEmpty()) {
+            json.put("conversation_id", conversationId);
         }
 
         String ret = sendRequest(CREATE_CHAT_MESSAGE, null, json);
         try {
-            return objectMapper.readValue(ret, new TypeReference<Message>() {});
+            return objectMapper.readValue(ret, Message.class);
         } catch (JsonProcessingException e) {
             throw new RuntimeException(e.getMessage(), e.getCause());
         }
     }
 
-    public PipedInputStream createChatMessageStream(JsonNode inputs, String query, String user, String conversation_id) throws DifyClientException {
-        ObjectNode json = objectMapper.createObjectNode();
+    /**
+     * Creates a new chat message (SSE Stream version).
+     */
+    public PipedInputStream createChatMessageStream(JsonNode inputs, String query, String user, String conversationId) throws DifyClientException {
+        val json = objectMapper.createObjectNode();
         json.put("inputs", inputs);
         json.put("query", query);
         json.put("user", user);
         json.put("response_mode", "streaming");
         json.put("auto_generate_name", autoGenerateName);
-        if (conversation_id != null && !conversation_id.isEmpty()) {
-            json.put("conversation_id", conversation_id);
+        if (conversationId != null && !conversationId.isEmpty()) {
+            json.put("conversation_id", conversationId);
         }
 
         return sendRequestStream(CREATE_CHAT_MESSAGE, null, json);
@@ -275,21 +295,20 @@ public class DifyClient {
      * Retrieves conversation messages.
      *
      * @param user           The user associated with the conversation.
-     * @param conversation_id The ID of the conversation.
-     * @param first_id       The ID of the first message to start fetching from.
+     * @param conversationId The ID of the conversation.
+     * @param firstId       The ID of the first message to start fetching from.
      * @param limit          The maximum number of messages to retrieve.
-     * @return The HTTP response containing the result of the API request.
      * @throws DifyClientException If an error occurs while sending the request.
      */
-    public MessageList getConversationMessages(String user, String conversation_id, String first_id, Integer limit) throws DifyClientException {
+    public PagedResult<Message> getConversationMessages(String user, String conversationId, String firstId, Integer limit) throws DifyClientException {
         Map<String, String> queryParams = new HashMap<>();
         queryParams.put("user", user);
 
-        if (conversation_id != null) {
-            queryParams.put("conversation_id", conversation_id);
+        if (conversationId != null) {
+            queryParams.put("conversation_id", conversationId);
         }
-        if (first_id != null) {
-            queryParams.put("first_id", first_id);
+        if (firstId != null) {
+            queryParams.put("first_id", firstId);
         }
         if (limit != null) {
             queryParams.put("limit", String.valueOf(limit));
@@ -298,7 +317,7 @@ public class DifyClient {
 
         String json = sendRequest(GET_CONVERSATION_MESSAGES, new String[] {formattedQueryParams}, null);
         try {
-            return objectMapper.readValue(json, MessageList.class);
+            return objectMapper.readValue(json, new TypeReference<PagedResult<Message>>() {});
         } catch (JsonProcessingException e) {
             throw new RuntimeException(e.getMessage(), e.getCause());
         }
@@ -308,16 +327,16 @@ public class DifyClient {
      * Retrieves conversations.
      *
      * @param user       The user associated with the conversations.
-     * @param last_id    The ID of the last record on the current page, default is null.
+     * @param lastId    The ID of the last record on the current page, default is null.
      * @param limit      The maximum number of conversations to retrieve.
      * @param sortBy     The sorting criteria for the conversations.
      * @throws DifyClientException If an error occurs while sending the request.
      */
-    public ConversationList getConversations(String user, String last_id, Integer limit, String sortBy) throws DifyClientException {
+    public PagedResult<Conversation> getConversations(String user, String lastId, Integer limit, String sortBy) throws DifyClientException {
         Map<String, String> queryParams = new HashMap<>();
         queryParams.put("user", user);
-        if (last_id != null && !last_id.isEmpty()) {
-            queryParams.put("last_id", last_id);
+        if (lastId != null && !lastId.isEmpty()) {
+            queryParams.put("last_id", lastId);
         }
         if (limit != null) {
             queryParams.put("limit", String.valueOf(limit));
@@ -328,7 +347,7 @@ public class DifyClient {
         String formattedQueryParams = generateQueryParams(queryParams);
         String json = sendRequest(GET_CONVERSATIONS, new String[] {formattedQueryParams}, null);
         try {
-            return objectMapper.readValue(json, ConversationList.class);
+            return objectMapper.readValue(json, new TypeReference<PagedResult<Conversation>>() {});
         } catch (JsonProcessingException e) {
             throw new RuntimeException(e.getMessage(), e.getCause());
         }
@@ -337,20 +356,20 @@ public class DifyClient {
     /**
      * Renames a conversation.
      *
-     * @param conversation_id The ID of the conversation to rename.
+     * @param conversationId The ID of the conversation to rename.
      * @param name            The new name for the conversation.
      * @param user            The user associated with the conversation.
      * @return The HTTP response containing the result of the API request.
      * @throws DifyClientException If an error occurs while sending the request.
      */
-    public JsonNode renameConversation(String conversation_id, String name, String user) throws DifyClientException {
-        ObjectNode json = objectMapper.createObjectNode();
+    public Conversation renameConversation(String conversationId, String name, String user) throws DifyClientException {
+        val json = objectMapper.createObjectNode();
         json.put("name", name);
         json.put("user", user);
 
-        String ret = sendRequest(RENAME_CONVERSATION, new String[]{conversation_id}, json);
+        val ret = sendRequest(RENAME_CONVERSATION, new String[]{conversationId}, json);
         try {
-            return objectMapper.readTree(ret);
+            return objectMapper.readValue(ret, Conversation.class);
         } catch (JsonProcessingException e) {
             throw new RuntimeException(e.getMessage(), e.getCause());
         }
@@ -359,18 +378,313 @@ public class DifyClient {
     /**
      * Deletes a conversation.
      *
-     * @param conversation_id The ID of the conversation to delete.
+     * @param conversationId The ID of the conversation to delete.
      * @param user            The user associated with the conversation.
-     * @return The HTTP response containing the result of the API request.
      * @throws DifyClientException If an error occurs while sending the request.
      */
-    public void deleteConversation(String conversation_id, String user) throws DifyClientException {
-        ObjectNode json = objectMapper.createObjectNode();
+    public void deleteConversation(String conversationId, String user) throws DifyClientException {
+        val json = objectMapper.createObjectNode();
         json.put("user", user);
 
-        sendRequest(DELETE_CONVERSATION, new String[]{conversation_id}, json);
+        sendRequest(DELETE_CONVERSATION, new String[]{conversationId}, json);
     }
 
+    ///////////////// knowledge base api /////////////////
+
+    /**
+     * Get datasets.
+     */
+    public PagedResult<KnowledgeBase> getDatasets(int page, Integer limit) {
+        val queryParams = new HashMap<String, String>();
+        queryParams.put("page", String.valueOf(page));
+        if (limit != null) {
+            queryParams.put("limit", String.valueOf(limit));
+        }
+        val formattedQueryParams = generateQueryParams(queryParams);
+        val ret = sendRequest(GET_DATASETS, new String[] {formattedQueryParams}, null);
+        try {
+            return objectMapper.readValue(ret, new TypeReference<PagedResult<KnowledgeBase>>() {});
+        } catch (JsonProcessingException e) {
+            throw new RuntimeException(e.getMessage(), e.getCause());
+        }
+    }
+
+    /**
+     * Create document by text.
+     * @param datasetId    The ID of knowledge base.
+     */
+    public DocResult createDocByTxt(String datasetId, DocCreateParam param) {
+        val ret = sendRequest(CREATE_DOC_TXT, new String[]{datasetId}, objectMapper.valueToTree(param));
+        try {
+            return objectMapper.readValue(ret, DocResult.class);
+        } catch (JsonProcessingException e) {
+            throw new RuntimeException(e.getMessage(), e.getCause());
+        }
+    }
+
+    /**
+     * Update document by text.
+     * @param datasetId    The ID of knowledge base.
+     * @param documentId   The ID of document.
+     */
+    public DocResult updateDocByTxt(String datasetId, String documentId, DocUpdateParam param) {
+        val ret = sendRequest(UPDATE_DOC_TXT, new String[]{datasetId, documentId}, objectMapper.valueToTree(param));
+        try {
+            return objectMapper.readValue(ret, DocResult.class);
+        } catch (JsonProcessingException e) {
+            throw new RuntimeException(e.getMessage(), e.getCause());
+        }
+    }
+
+
+    /**
+     * Deletes a conversation.
+     *
+     * @param datasetId    The ID of knowledge base.
+     * @param documentId   The ID of document.
+     * @throws DifyClientException If an error occurs while sending the request.
+     */
+    public void deleteDoc(String datasetId, String documentId) throws DifyClientException {
+        sendRequest(DELETE_DOCUMENT, new String[]{datasetId, documentId}, null);
+    }
+
+    /**
+     * Get documents.
+     */
+    public List<Document> getDocuments(String datasetId, String keyword) throws DifyClientException {
+        Map<String, String> queryParams = new HashMap<>();
+        if (keyword != null && !keyword.isEmpty()) {
+            queryParams.put("keyword", keyword);
+        }
+        String formattedQueryParams = generateQueryParams(queryParams);
+        String json = sendRequest(GET_DOCUMENTS, new String[]{datasetId, formattedQueryParams}, null);
+        try {
+            return objectMapper.readValue(json, new TypeReference<List<Document>>() {});
+        } catch (JsonProcessingException e) {
+            throw new RuntimeException(e.getMessage(), e.getCause());
+        }
+    }
+
+    /**
+     * retrieve knowledge
+     */
+    public RetrieveResult retrieveKnowledge(String datasetId, RetrieveKnowledgeParam param) throws DifyClientException {
+        String json = sendRequest(GET_DOCUMENTS, new String[] {datasetId}, objectMapper.valueToTree(param));
+        try {
+            return objectMapper.readValue(json, RetrieveResult.class);
+        } catch (JsonProcessingException e) {
+            throw new RuntimeException(e.getMessage(), e.getCause());
+        }
+    }
+
+    ///////////////// models /////////////////
+
+    // chat
+
+    public static class Message {
+        public String id;
+        public String conversationId;
+        public String parentMessageId;
+        public Map<String, Object> inputs;
+        public String query;
+        public String answer;
+        public Object messageFiles;
+        public Object feedback;
+        public Object retrieverResources;
+        public Date createdAt;
+    }
+
+    public static class PagedResult<T> {
+        public List<T> data;
+        public boolean hasMore;
+        public int limit;
+    }
+
+    public static class Conversation {
+        public String id;
+        public String name;
+        public Map<String, Object> inputs;
+        public List<Message> messages;
+        public String status;
+        public String introduction;
+        public Date createdAt;
+        public Date updatedAt;
+    }
+
+    public static class Document {
+        public String id;
+        public int position;
+        public String dataSourceType;
+        public Object dataSourceInfo;
+        public String datasetProcessRuleId;
+        public String name;
+        public String createdFrom;
+        public String createdBy;
+        public Date createdAt;
+        public int tokens;
+        public String indexingStatus;
+        public Object error;
+        public boolean enabled;
+        public Object disabledAt;
+        public Object disabledBy;
+        public boolean archived;
+    }
+
+    // knowledge base
+
+    public static class KnowledgeBase {
+        public String id;
+        public String name;
+        public String description;
+        public String permission;
+        public String dataSourceType;
+        public String indexingTechnique;
+        public int appCount;
+        public int documentCount;
+        public int wordCount;
+        public String createdBy;
+        public Date createdAt;
+        public String updatedBy;
+        public Date updatedAt;
+    }
+
+    public static class DocCreateParam {
+        public String name;  // 文档名称
+        public String text;  // 文档内容
+        public String docType;  // 文档类型（选填）
+        public Map<String, Object> docMetadata;  // 文档元数据（如提供文档类型则必填）
+        public String indexingTechnique;  // 索引方式：高质量/high_quality 或 经济/economy
+        public String docForm = "text_model";  // 索引内容的形式：text_model、hierarchical_model 或 qa_model
+        public String docLanguage = "English";  // 在 Q&A 模式下，指定文档的语言，例如：English、Chinese
+        public DocProcessRule processRule = new DocProcessRule();  // 处理规则
+        public RetrievalModel retrievalModel;  // 检索模式（首次上传时需要提供）
+        public String embeddingModel;  // Embedding 模型名称
+        public String embeddingModelProvider;  // Embedding 模型供应商
+
+
+        public static class RetrievalModel {
+            public String searchMethod;  // 检索方法：hybrid_search、semantic_search 或 full_text_search
+            public boolean rerankingEnable;  // 是否开启 rerank
+            public RerankingModel rerankingModel;  // Rerank 模型配置
+            public int topK;  // 召回条数
+            public boolean scoreThresholdEnabled;  // 是否开启召回分数限制
+            public float scoreThreshold;  // 召回分数限制
+
+            public static class RerankingModel {
+                public String rerankingProviderName;  // Rerank 模型的提供商
+                public String rerankingModelName;  // Rerank 模型的名称
+            }
+        }
+    }
+
+    public static class DocResult {
+        public Document document;
+        public String batch;
+    }
+
+    public static class RetrieveResult {
+        public QueryWrapper query;
+        public List<Record> records;
+
+        public static class QueryWrapper {
+            public String content;
+        }
+
+        public static class Record {
+            public Segment segment;
+            public double score;
+            public Object tsnePosition;
+
+            public static class Segment {
+                public String id;
+                public int position;
+                public String documentId;
+                public String content;
+                public Object answer;
+                public int wordCount;
+                public int tokens;
+                public List<String> keywords;
+                public String indexNodeId;
+                public String indexNodeHash;
+                public int hitCount;
+                public boolean enabled;
+                public Object disabledAt;
+                public Object disabledBy;
+                public String status;
+                public String createdBy;
+                public long createdAt;
+                public long indexingAt;
+                public long completedAt;
+                public Object error;
+                public Object stoppedAt;
+                public Document document;
+
+                public static class Document {
+                    public String id;
+                    public String dataSourceType;
+                    public String name;
+                    public Object docType;
+                }
+            }
+        }
+    }
+
+    public static class RetrieveKnowledgeParam {
+        public String query;  // 检索关键词
+        public RetrievalModel retrievalModel;  // 检索参数（选填）
+
+        public static class RetrievalModel {
+            public String searchMethod;  // 检索方法：keyword_search, semantic_search, full_text_search, hybrid_search
+            public Boolean rerankingEnable;  // 是否启用 Reranking
+            public RerankingMode rerankingMode;  // Rerank 模型配置
+            public Float weights;  // 混合检索模式下语意检索的权重设置
+            public Integer topK;  // 返回结果数量
+            public Boolean scoreThresholdEnabled;  // 是否开启 score 阈值
+            public Float scoreThreshold;  // Score 阈值
+
+            public static class RerankingMode {
+                public String rerankingProviderName;  // Rerank 模型提供商
+                public String rerankingModelName;  // Rerank 模型名称
+            }
+        }
+    }
+
+    public static class DocUpdateParam {
+        public String name;  // 文档名称
+        public String text;  // 文档内容
+        public DocProcessRule processRule;  // 处理规则
+    }
+
+    public static class DocProcessRule {
+        public String mode = "automatic";  // 清洗、分段模式：automatic 自动 / custom 自定义
+        public Rules rules;  // 自定义规则（自动模式下，该字段为空）
+
+        public static class Rules {
+            public List<PreProcessingRule> preProcessingRules;  // 预处理规则
+            public Segmentation segmentation;  // 分段规则
+            public String parentMode;  // 父分段的召回模式：full-doc 全文召回 / paragraph 段落召回
+            public SubchunkSegmentation subchunkSegmentation;  // 子分段规则
+
+            public static class PreProcessingRule {
+                public String id;  // 预处理规则的唯一标识符
+                public boolean enabled;  // 是否选中该规则
+            }
+
+            public static class Segmentation {
+                public String separator;  // 自定义分段标识符，默认为 \n
+                public int maxTokens;  // 最大长度（token），默认为 1000
+            }
+
+            public static class SubchunkSegmentation {
+                public String separator;  // 分段标识符，默认为 ***
+                public int maxTokens;  // 最大长度（token），需要校验小于父级的长度
+                public int chunkOverlap;  // 分段重叠部分（选填）
+            }
+        }
+    }
+
+
+    ///////////////// utils /////////////////
 
     /**
      * This exception class represents a general exception that may occur while using the Dify API client.
@@ -399,23 +713,23 @@ public class DifyClient {
         }
     }
 
-    public static class DifyRoute {
+    @AllArgsConstructor
+    private static class DifyRoute {
         public String method;
-        public  String url;
+        public String url;
+        public int type;
 
-        public DifyRoute(String method, String url) {
-            this.method = method;
-            this.url = url;
-        }
+        public static final int TYPE_CHAT = 0;
+        public static final int TYPE_KNOWLEDGE_BASE = 1;
     }
 
     // parse server sent event
-    public void parseSSE(InputStream inputStream, OutputStream outputStream) {
+    private void parseSSE(InputStream inputStream, OutputStream outputStream) {
         String line;
         String currentMessage = null;
 
-        try (BufferedReader reader = new BufferedReader(new InputStreamReader(inputStream));
-             BufferedWriter writer = new BufferedWriter(new OutputStreamWriter(outputStream, StandardCharsets.UTF_8))) {
+        try (val reader = new BufferedReader(new InputStreamReader(inputStream));
+             val writer = new BufferedWriter(new OutputStreamWriter(outputStream, StandardCharsets.UTF_8))) {
             while ((line = reader.readLine()) != null) {
                 // 每次遇到空行表示当前消息结束
                 if (line.isEmpty()) {
@@ -443,51 +757,26 @@ public class DifyClient {
         }
     }
 
-    public static class Message {
-        public String id;
-        public String conversation_id;
-        public String parent_message_id;
-        public Object inputs;
-        public String query;
-        public String answer;
-        public Object message_files;
-        public Object feedback;
-        public Object retriever_resources;
-        public Date created_at;
-    }
-
-    public static class MessageList {
-        public List<Message> data;
-        public boolean has_more;
-        public int limit;
-    }
-
-    public static class ConversationList {
-        public List<Conversation> data;
-        public boolean has_more;
-        public int limit;
-    }
-
-    public static class Conversation {
-        public String id;
-        public String name;
-        public Map<String, Object> inputs;
-        public List<Message> messages;
-        public String status;
-        public String introduction;
-        public Date created_at;
-        public Date updated_at;
+    /**
+     * Generates query parameters in the form of key-value pairs joined by "&".
+     *
+     * @param params The map of query parameter key-value pairs.
+     * @return A string representation of the generated query parameters.
+     */
+    private String generateQueryParams(Map<String, String> params) {
+        return params.entrySet().stream().map(entry -> entry.getKey() + "=" + entry.getValue())
+                .collect(Collectors.joining("&"));
     }
 
     /**
      * https://github.com/ItamarBenjamin/stream-rest-template
      * */
-    public static class StreamRestTemplate extends RestTemplate {
+    private static class StreamRestTemplate extends RestTemplate {
         private static final DeferredCloseClientHttpRequestInterceptor deferredCloseClientHttpRequestInterceptor =
                 new DeferredCloseClientHttpRequestInterceptor();
 
         public StreamRestTemplate() {
-            super.setInterceptors(Lists.newArrayList(deferredCloseClientHttpRequestInterceptor));
+            super.setInterceptors(Collections.singletonList(deferredCloseClientHttpRequestInterceptor));
             getMessageConverters().removeIf(i -> i instanceof ResourceHttpMessageConverter);
             getMessageConverters().add(new ResourceHttpMessageConverter());
         }
@@ -502,8 +791,7 @@ public class DifyClient {
             if (interceptorExists && interceptors.get(0) == deferredCloseClientHttpRequestInterceptor) {
                 return interceptors;
             }
-            LinkedList<ClientHttpRequestInterceptor> newInterceptors = Lists.newLinkedList();
-            newInterceptors.addAll(interceptors);
+            val newInterceptors = new LinkedList<>(interceptors);
             if (interceptorExists) {
                 newInterceptors.remove(deferredCloseClientHttpRequestInterceptor);
             }
@@ -512,7 +800,7 @@ public class DifyClient {
         }
 
         @Override
-        public  <T> ResponseExtractor<ResponseEntity<T>> responseEntityExtractor(Type responseType) {
+        public <T> ResponseExtractor<ResponseEntity<T>> responseEntityExtractor(Type responseType) {
             ResponseExtractor<ResponseEntity<T>> responseEntityResponseExtractor = super.responseEntityExtractor(responseType);
             boolean isStream = responseType == InputStreamResource.class;
             return new StreamResponseExtractor<>(isStream, responseEntityResponseExtractor);
@@ -601,3 +889,4 @@ public class DifyClient {
         }
     }
 }
+
